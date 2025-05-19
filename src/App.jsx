@@ -12,10 +12,20 @@ export default function App() {
   const [language, setLanguage] = useState('english');
   const [inCall, setInCall] = useState(false);
   const [muted, setMuted] = useState(false);
+  const joinRequestedRef = useRef(false);
 
   useEffect(() => {
     wsRef.current = new WebSocket(SIGNALING_SERVER_URL);
-    wsRef.current.onopen = () => setStatus('✅ Connected to signaling server');
+
+    wsRef.current.onopen = () => {
+      setStatus('✅ Connected to signaling server');
+      if (joinRequestedRef.current) {
+        sendSignal('join', { language });
+        joinRequestedRef.current = false;
+        setStatus('🔎 Looking for a partner...');
+      }
+    };
+
     wsRef.current.onmessage = async (message) => {
       const { type, data } = JSON.parse(message.data);
       setStatus(`📡 Signal received: ${type}`);
@@ -48,15 +58,24 @@ export default function App() {
         endCall();
       }
     };
-  }, []);
+  }, [language]);
 
   const sendSignal = (type, data) => {
-    wsRef.current.send(JSON.stringify({ type, data }));
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type, data }));
+    } else {
+      console.warn('WebSocket not open. Cannot send:', type);
+    }
   };
 
   const joinQueue = () => {
-    setStatus('🔎 Looking for a partner...');
-    wsRef.current.send(JSON.stringify({ type: 'join', data: { language } }));
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      sendSignal('join', { language });
+      setStatus('🔎 Looking for a partner...');
+    } else {
+      joinRequestedRef.current = true;
+      setStatus('⏳ Waiting for WebSocket connection...');
+    }
   };
 
   const startPeerConnection = async (isInitiator) => {
