@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import './App.css';
 
-const SIGNALING_SERVER_URL = 'ws://localhost:3001';
+const SIGNALING_SERVER_URL = 'wss://voxa-signaling-server.onrender.com';
 
 export default function App() {
   const pcRef = useRef();
