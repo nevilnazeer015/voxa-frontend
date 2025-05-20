@@ -1,144 +1,168 @@
+// App.jsx
 import React, { useEffect, useRef, useState } from 'react';
 import './App.css';
 
 const SIGNALING_SERVER_URL = 'wss://voxa-signaling-clean.onrender.com';
 
 export default function App() {
-  const pcRef = useRef();
-  const wsRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
-  const [status, setStatus] = useState('Idle');
-  const [language, setLanguage] = useState('english');
-  const [inCall, setInCall] = useState(false);
+  const peerRef = useRef(null);
+  const wsRef = useRef(null);
+
   const [muted, setMuted] = useState(false);
-  const joinRequestedRef = useRef(false);
+  const [language, setLanguage] = useState('english');
+
+  const [otherJoined, setOtherJoined] = useState(false);
+  const [inCall, setInCall] = useState(false);
+  const [callStarted, setCallStarted] = useState(false);
+  const [status, setStatus] = useState('');
 
   useEffect(() => {
+    if (!callStarted) return;
+
     wsRef.current = new WebSocket(SIGNALING_SERVER_URL);
 
     wsRef.current.onopen = () => {
-      setStatus('✅ Connected to signaling server');
-      if (joinRequestedRef.current) {
-        sendSignal('join', { language });
-        joinRequestedRef.current = false;
-        setStatus('🔎 Looking for a partner...');
-      }
+      wsRef.current.send(JSON.stringify({ type: 'join', language }));
+      setStatus('📞 Calling...');
     };
 
-    wsRef.current.onmessage = async (message) => {
-      const { type, data } = JSON.parse(message.data);
-      setStatus(`📡 Signal received: ${type}`);
-
-      if (type === 'match') {
-        const isCaller = data.isCaller;
-        startPeerConnection(isCaller);
-      }
+    wsRef.current.onmessage = async (event) => {
+      const { type, data } = JSON.parse(event.data);
 
       if (type === 'offer') {
-        await pcRef.current.setRemoteDescription(new RTCSessionDescription(data));
-        const answer = await pcRef.current.createAnswer();
-        await pcRef.current.setLocalDescription(answer);
-        sendSignal('answer', answer);
+        const pc = createPeer(false);
+        await pc.setRemoteDescription(data.offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        wsRef.current.send(JSON.stringify({ type: 'answer', answer }));
+        setInCall(true);
+        setStatus('🎧 Connected');
       }
 
       if (type === 'answer') {
-        await pcRef.current.setRemoteDescription(new RTCSessionDescription(data));
+        peerRef.current.setRemoteDescription(data.answer);
+        setInCall(true);
+        setStatus('🎧 Connected');
       }
 
       if (type === 'candidate') {
-        try {
-          await pcRef.current.addIceCandidate(new RTCIceCandidate(data));
-        } catch (e) {
-          console.error('Failed to add ICE candidate', e);
-        }
+        peerRef.current.addIceCandidate(data.candidate);
       }
 
-      if (type === 'leave') {
+      if (type === 'peer-joined') {
+        setOtherJoined(true);
+        callUser();
+      }
+
+      if (type === 'peer-left') {
+        setOtherJoined(false);
+        setInCall(false);
+        setStatus('🔌 User disconnected');
         endCall();
       }
     };
-  }, [language]);
 
-  const sendSignal = (type, data) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type, data }));
-    } else {
-      console.warn('WebSocket not open. Cannot send:', type);
-    }
-  };
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      localStreamRef.current = stream;
+    });
 
-  const joinQueue = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      sendSignal('join', { language });
-      setStatus('🔎 Looking for a partner...');
-    } else {
-      joinRequestedRef.current = true;
-      setStatus('⏳ Waiting for WebSocket connection...');
-    }
-  };
-
-  const startPeerConnection = async (isInitiator) => {
-    pcRef.current = new RTCPeerConnection();
-    localStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-    localStreamRef.current.getTracks().forEach(track => pcRef.current.addTrack(track, localStreamRef.current));
-    pcRef.current.ontrack = event => {
-      remoteAudioRef.current.srcObject = event.streams[0];
-      remoteAudioRef.current.play();
-      setStatus('🔊 Remote audio stream connected!');
-      setInCall(true);
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+      if (peerRef.current) peerRef.current.close();
     };
-    pcRef.current.onicecandidate = e => {
-      if (e.candidate) sendSignal('candidate', e.candidate);
+  }, [callStarted]);
+
+  const createPeer = (isInitiator) => {
+    const pc = new RTCPeerConnection();
+    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+
+    pc.ontrack = (e) => {
+      remoteAudioRef.current.srcObject = e.streams[0];
     };
 
-    if (isInitiator) {
-      const offer = await pcRef.current.createOffer();
-      await pcRef.current.setLocalDescription(offer);
-      sendSignal('offer', offer);
-      setStatus('📤 Creating offer...');
-    } else {
-      setStatus('📡 Waiting for offer...');
-    }
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        wsRef.current.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
+      }
+    };
+
+    peerRef.current = pc;
+    return pc;
+  };
+
+  const callUser = async () => {
+    const pc = createPeer(true);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    wsRef.current.send(JSON.stringify({ type: 'offer', offer }));
+    setStatus('📞 Calling...');
   };
 
   const toggleMute = () => {
-    const audioTrack = localStreamRef.current?.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      setMuted(!audioTrack.enabled);
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks()[0].enabled = muted;
+      setMuted(!muted);
     }
   };
 
   const endCall = () => {
-    pcRef.current?.close();
-    localStreamRef.current?.getTracks().forEach(t => t.stop());
-    pcRef.current = null;
+    if (peerRef.current) peerRef.current.close();
     setInCall(false);
-    setStatus('👋 Call ended');
-    sendSignal('leave');
+    setCallStarted(false);
+    setStatus('Call ended');
+    window.location.reload();
   };
 
   return (
     <div className="container">
-      <h2>🎙️ Voxa - Talk to Someone Random</h2>
-      {!inCall && (
+      <h1 className="title">Voxa Voice</h1>
+
+      {!callStarted && (
         <>
-          <select value={language} onChange={e => setLanguage(e.target.value)}>
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            className="dropdown"
+          >
             <option value="english">English</option>
             <option value="hindi">Hindi</option>
             <option value="arabic">Arabic</option>
+            <option value="spanish">Spanish</option>
           </select>
-          <button onClick={joinQueue}>Start Talking</button>
+
+          <button className="primary" onClick={() => setCallStarted(true)}>
+            🎙️ Tap to Talk
+          </button>
         </>
       )}
-      {inCall && (
+
+      {callStarted && (
         <>
-          <button onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
-          <button onClick={endCall}>End Call</button>
+          {status && <p className="status">{status}</p>}
+
+          <div className="controls">
+            {inCall ? (
+              <>
+                <button onClick={toggleMute}>
+                  {muted ? '🎤 Unmute' : '🔇 Mute'}
+                </button>
+                <button onClick={endCall}>❌ End Call</button>
+              </>
+            ) : (
+              <button onClick={endCall}>❌ Cancel</button>
+            )}
+          </div>
+
+          <div className="info">
+            {inCall && <span className="joined">🟢 User connected</span>}
+            {!inCall && callStarted && <span className="waiting">🕒 Waiting for user...</span>}
+            <span>🌍 Language: {language}</span>
+          </div>
         </>
       )}
-      <p>Status: {status}</p>
+
       <audio ref={remoteAudioRef} autoPlay />
     </div>
   );
