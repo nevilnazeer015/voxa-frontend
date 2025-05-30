@@ -1,7 +1,8 @@
 const http = require('http');
 const WebSocket = require('ws');
 
-const PORT = process.env.PORT;
+const PORT = process.env.PORT; // ✅ Do NOT use 10000
+
 const server = http.createServer((req, res) => {
   res.writeHead(200);
   res.end('✅ Voxa signaling server is live.');
